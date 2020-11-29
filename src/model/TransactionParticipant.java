@@ -40,3 +40,4 @@ public abstract class TransactionParticipant {
         return Objects.hash(id);
     }
 }
+

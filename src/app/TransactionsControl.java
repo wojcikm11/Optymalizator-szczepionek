@@ -5,179 +5,168 @@ import exception.InputDataException;
 import exception.InvalidConnectionsException;
 import io.FileManager;
 import io.ResultPrinter;
-import model.Connection;
-import model.FileData;
-import model.Pharmacy;
-import model.Producer;
+import model.*;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class TransactionsControl {
+
     private ResultPrinter resultPrinter;
     private FileManager fileManager;
-    private FileData fileData;
     private DataControl dataControl;
+
+    private List<VAMProducer> producers;
+    private List<VAMPharmacy> pharmacies;
 
     public TransactionsControl(String fileName) {
         try {
             fileManager = new FileManager();
-            fileData = fileManager.readData(fileName);
             resultPrinter = new ResultPrinter();
-            dataControl = new DataControl();
-        } catch (NumberFormatException e) {
-            System.err.println("Błąd w danie liczbowej w linijce " + fileManager.getLine());
-            System.exit(-1);
-        } catch (IdAlreadyExistsException | IllegalArgumentException | InputDataException | InvalidConnectionsException e) {
-//            System.err.println(e.getClass().getName());
+            dataControl = fileManager.getDataControl();
+            Participants participants = fileManager.readData(fileName);
+            initializeLists(participants);
+        } catch (IdAlreadyExistsException | IllegalArgumentException | InputDataException
+                | InvalidConnectionsException e) {
             System.err.println(e.getMessage());
-            System.exit(-1);
+            System.exit(1);
         }
     }
 
-    public void minimizeCosts() {
-        List<Producer> producers = fileData.getProducers();
-        List<Pharmacy> pharmacies = fileData.getPharmacies();
-        List<Connection> connections = fileData.getConnections();
-        int[] pharmaciesIds = fileData.getPharmaciesIds();
-        int[] producersIds = fileData.getProducersIds();
+    private void initializeLists(Participants participants) {
+        List<Producer> producersList = participants.getProducers();
+        List<Pharmacy> pharmaciesList = participants.getPharmacies();
 
-        double[][] producersPharmaciesVector;
+        this.producers = new ArrayList<>();
+        this.pharmacies = new ArrayList<>();
 
-        if(problemBalanced(producers, pharmacies)) // do zastanowienia czy rozpatrywać w ogóle taki przypadek
-            producersPharmaciesVector = createVector(connections, producersIds, pharmaciesIds, true);
-        else
-            producersPharmaciesVector = createVector(connections, producersIds, pharmaciesIds, false);
+        for (Producer producer : producersList)
+            producers.add(new VAMProducer(producer));
 
-        getVaccinesSoldToPharmaciesVector(producersPharmaciesVector, pharmaciesIds, producersIds, producers, pharmacies);
-
+        for (Pharmacy pharmacy : pharmaciesList)
+            pharmacies.add(new VAMPharmacy(pharmacy));
     }
 
-    private double[][] getVaccinesSoldToPharmaciesVector(double[][] producersPharmaciesVector,
-                                                         int[] pharmaciesIds, int[] producersIds,
-                                                         List<Producer> producers, List<Pharmacy> pharmacies) {
-
-        int[] producersSupply = getProducersSupplyVector(producersIds, producers);
-        int[] pharmaciesDemand = getPharmaciesDemandVector(pharmaciesIds, pharmacies);
-
-        double[][] vaccinesPricesVector = producersPharmaciesVector.clone();
-        int[] producersSupplyCopy = producersSupply.clone();
-        int[] pharmaciesDemandCopy = pharmaciesDemand.clone();
-
-        return leastCostCell(vaccinesPricesVector, producersSupplyCopy, pharmaciesDemandCopy);
-    }
-
-    private double[][] leastCostCell(double[][] vaccinesPricesVector, int[] producersSupply, int[] pharmaciesDemand) {
-        double[][] vaccinesSoldToPharmaciesVector = new double[vaccinesPricesVector.length][vaccinesPricesVector[0].length];
-
-        while(vectorContainsElementsToBeIgnored(vaccinesPricesVector)) {
-
-            int[] minCellCords = findMinCellCords(vaccinesPricesVector);
-
-            int minProducerRow = minCellCords[0];
-            int minPharmacyColumn = minCellCords[1];
-
-            int producerSupply = producersSupply[minProducerRow];
-            int pharmacyDemand = pharmaciesDemand[minPharmacyColumn];
-            int maxAmountPossible = Math.min(producerSupply, pharmacyDemand);
-
-            if (maxAmountPossible == producerSupply && maxAmountPossible == pharmacyDemand) {
-                producersSupply[minProducerRow] = 0;
-                pharmaciesDemand[minPharmacyColumn] = 0;
-                ignoreRow(vaccinesPricesVector, minProducerRow);
-                ignoreColumn(vaccinesPricesVector, minPharmacyColumn);
-            } else if (maxAmountPossible == producerSupply) {
-                producersSupply[minProducerRow] = 0;
-                pharmaciesDemand[minPharmacyColumn] -= maxAmountPossible;
-                ignoreRow(vaccinesPricesVector, minProducerRow);
-            } else {
-                producersSupply[minProducerRow] -= maxAmountPossible;
-                pharmaciesDemand[minPharmacyColumn] = 0;
-                ignoreColumn(vaccinesPricesVector, minPharmacyColumn);
-            }
-            vaccinesSoldToPharmaciesVector[minProducerRow][minPharmacyColumn] = maxAmountPossible;
+    public void minimizeAndPrintCosts() {
+        while(!allPharmaciesHaveDemandsProvided()) {
+            calculateProducersVAMValues();
+            calculatePharmaciesVAMValues();
+            sellVaccines();
         }
-        return vaccinesSoldToPharmaciesVector;
+        resultPrinter.printTransactions(pharmacies);
     }
 
-    private boolean vectorContainsElementsToBeIgnored(double[][] producersPharmacies) {
-        for (int i = 0; i < producersPharmacies.length; i++) {
-            for (int j = 0; j < producersPharmacies[0].length; j++) {
-                if (producersPharmacies[i][j] != -1)
-                    return true;
-            }
+    private boolean allPharmaciesHaveDemandsProvided() {
+        for (VAMPharmacy pharmacy : pharmacies) {
+            if (pharmacy.getPharmacy().getVaccinesAmount() < pharmacy.getPharmacy().getDemand())
+                return false;
         }
-        return false;
+        return true;
     }
 
-    private void ignoreColumn(double[][] producersPharmacies, int columnToIgnore) {
-        for (int i = 0; i < producersPharmacies.length; i++) {
-            producersPharmacies[i][columnToIgnore] = -1;
-        }
-    }
-
-    private void ignoreRow(double[][] producersPharmacies, int rowToIgnore) {
-        for (int i = 0; i < producersPharmacies[0].length; i++) {
-            producersPharmacies[rowToIgnore][i] = -1;
-        }
-    }
-
-    private int[] findMinCellCords(double[][] producersPharmacies) {
-        double minValue = producersPharmacies[0][0];
-        int[] minCellCords = new int[2];
-        int minProducerRow = 0;
-        int minPharmacyColumn = 0;
-
-        for (int i = 0; i < producersPharmacies.length; i++) {
-            for (int j = 0; j < producersPharmacies[0].length; j++) {
-                if (producersPharmacies[i][j] == -1)
-                    continue;
-
-                if (producersPharmacies[i][j] < minValue) {
-                    minValue = producersPharmacies[i][j];
-                    minProducerRow = i;
-                    minPharmacyColumn = j;
+    private void calculatePharmaciesVAMValues() {
+        for (VAMPharmacy pharmacy : pharmacies) {
+            if (pharmacy.getPharmacy().getVaccinesAmount() < pharmacy.getPharmacy().getDemand()) {
+                List<Double> availablePharmacyConnectionsCosts = new ArrayList<>();
+                for (Connection connection : pharmacy.getPharmacy().getConnections()) {
+                    if (connection.getVaccinesSold() <= connection.getMaxVaccines())
+                        availablePharmacyConnectionsCosts.add(connection.getPrice());
                 }
+                setVAMValues(pharmacy, availablePharmacyConnectionsCosts);
+            } else {
+                pharmacy.setVamValue(0);
             }
         }
-        minCellCords[0] = minProducerRow;
-        minCellCords[1] = minPharmacyColumn;
-        return minCellCords;
     }
 
-    private int[] getProducersSupplyVector(int[] producersIds, List<Producer> producers) {
-        int[] producersSupply = new int[producersIds.length];
-        for (int i = 0; i < producersSupply.length; i++)
-            producersSupply[i] = getSupplyById(producers, producersIds[i]);
-
-        return producersSupply;
+    private void calculateProducersVAMValues() {
+        for (VAMProducer producer : producers) {
+            if (producer.getProducer().getStock() > 0) {
+                List<Double> availableProducerConnectionsCosts = new ArrayList<>();
+                for (Connection connection : producer.getProducer().getConnections()) {
+                    if (connection.getVaccinesSold() <= connection.getMaxVaccines())
+                        availableProducerConnectionsCosts.add(connection.getPrice());
+                }
+                setVAMValues(producer, availableProducerConnectionsCosts);
+            } else
+                producer.setVamValue(0);
+        }
     }
 
-    private int[] getPharmaciesDemandVector(int[] pharmaciesIds, List<Pharmacy> pharmacies) {
-        int[] pharmaciesDemand = new int[pharmaciesIds.length];
-        for (int i = 0; i < pharmaciesDemand.length; i++)
-            pharmaciesDemand[i] = getDemandById(pharmacies, pharmaciesIds[i]);
-
-        return pharmaciesDemand;
+    private void setVAMValues(VAMModel vamModel, List<Double> availableConnectionsCosts) {
+        Collections.sort(availableConnectionsCosts);
+        if (availableConnectionsCosts.size() > 1)
+            vamModel.setVamValue(availableConnectionsCosts.get(1) - availableConnectionsCosts.get(0));
+        else if (availableConnectionsCosts.size() == 1)
+            vamModel.setVamValue(availableConnectionsCosts.get(0));
+        else
+            vamModel.setVamValue(0);
     }
 
-    private int getSupplyById(List<Producer> producers, int producerId) {
-        return dataControl.getSupplyById(producers, producerId);
+    private VAMProducer getProducerWithHighestVAMValue() {
+        VAMProducer highestVamProducer = producers.get(0);
+        for (VAMProducer producer : producers) {
+            if (producer.getVamValue() > highestVamProducer.getVamValue())
+                highestVamProducer = producer;
+        }
+        return highestVamProducer;
     }
 
-    private int getDemandById(List<Pharmacy> pharmacies, int pharmacyId) {
-        return dataControl.getDemandById(pharmacies, pharmacyId);
+    private VAMPharmacy getPharmacyWithHighestVAMValue() {
+        VAMPharmacy highestVamPharmacy = pharmacies.get(0);
+        for (VAMPharmacy pharmacy : pharmacies) {
+            if (pharmacy.getVamValue() > highestVamPharmacy.getVamValue())
+                highestVamPharmacy = pharmacy;
+        }
+        return highestVamPharmacy;
     }
 
-    private double[][] createVector(List<Connection> connections, int[] producersIds, int[] pharmaciesIds, boolean isBalanced) {
-        return dataControl.createVector(connections, producersIds, pharmaciesIds, isBalanced);
+    private void sellVaccines() {
+        VAMProducer producerHighestVam = getProducerWithHighestVAMValue();
+        VAMPharmacy pharmacyHighestVam = getPharmacyWithHighestVAMValue();
+
+        if (producerHighestVam.getVamValue() >= pharmacyHighestVam.getVamValue())
+            sellVaccinesProducer(producerHighestVam);
+        else
+            sellVaccinesPharmacy(pharmacyHighestVam);
     }
 
-
-    private boolean problemBalanced(List<Producer> producers, List<Pharmacy> pharmacies) {
-        return dataControl.problemBalanced(producers, pharmacies);
+    private void sellVaccinesProducer(VAMProducer producer) {
+        List<Connection> producerConnections = producer.getProducer().getConnections();
+        computeConnections(producerConnections);
     }
 
-    private int findSupply(List<Connection> connections) {
+    private void computeConnections(List<Connection> producerConnections) {
+        Connection cheapestConnectionPossible = getCheapestConnectionPossible(producerConnections);
+        int maxAmountPossibleToSell = Math.min(cheapestConnectionPossible.getPharmacy().getDemand() -
+                        cheapestConnectionPossible.getPharmacy().getVaccinesAmount(),
+                cheapestConnectionPossible.getProducer().getStock());
 
+        maxAmountPossibleToSell = Math.min(maxAmountPossibleToSell, cheapestConnectionPossible.getMaxVaccines());
+        cheapestConnectionPossible.getProducer().subtractStock(maxAmountPossibleToSell);
+        cheapestConnectionPossible.getPharmacy().addVaccines(maxAmountPossibleToSell);
+        cheapestConnectionPossible.addVaccinesSold(maxAmountPossibleToSell);
+    }
+
+    private Connection getCheapestConnectionPossible(List<Connection> connections) {
+        Collections.sort(connections);
+        for (Connection connection : connections) {
+            if (connectionValid(connection))
+                return connection;
+        }
+        return null;
+    }
+
+    private boolean connectionValid(Connection connection) {
+        return connection.getVaccinesSold() < connection.getMaxVaccines()
+                && connection.getPharmacy().getVaccinesAmount() < connection.getPharmacy().getDemand()
+                && connection.getProducer().getStock() > 0;
+    }
+
+    private void sellVaccinesPharmacy(VAMPharmacy pharmacy) {
+        List<Connection> pharmacyConnections = pharmacy.getPharmacy().getConnections();
+        computeConnections(pharmacyConnections);
     }
 }
+

@@ -4,6 +4,7 @@ import app.DataControl;
 import exception.IdAlreadyExistsException;
 import exception.InputDataException;
 import exception.InvalidConnectionsException;
+import exception.ParticipantNotInFileException;
 import model.*;
 
 import java.io.*;
@@ -20,21 +21,13 @@ public class FileManager {
 
     private DataControl dataControl;
 
+    public DataControl getDataControl() {
+        return dataControl;
+    }
+
     public FileManager() {
         dataControl = new DataControl();
         line = 0;
-    }
-
-    public int getLine() {
-        return line;
-    }
-
-    public int[] getProducersIds() {
-        return producersIds;
-    }
-
-    public int[] getPharmaciesIds() {
-        return pharmaciesIds;
     }
 
     private String readLine(BufferedReader bufferedReader) throws IOException {
@@ -42,7 +35,7 @@ public class FileManager {
         return bufferedReader.readLine();
     }
 
-    public FileData readData(String fileName) throws NumberFormatException {
+    public Participants readData(String fileName) throws NumberFormatException {
         List<Producer> producers = null;
         List<Pharmacy> pharmacies = null;
         List<Connection> connections = null;
@@ -53,30 +46,64 @@ public class FileManager {
             if (new File(fileName).length() == 0)
                 throw new IllegalArgumentException("Podany plik nie może być pusty!");
 
+            int maxLines = 10000;
+            if (new File(fileName).length() > maxLines)
+                throw new IllegalArgumentException("Podany plik nie może zawierać więcej niż " + maxLines + " " +
+                                                   "linijek! Aktualna liczba linijek w pliku: " +
+                                                    new File(fileName).length());
+
             producers = readProducers(reader);
             pharmacies = readPharmacies(reader);
-            connections = readConnections(reader);
+            connections = readConnections(reader, producers, pharmacies);
         } catch (FileNotFoundException e) {
             System.err.println("Nie znaleziono pliku o nazwie " + fileName);
-            System.exit(-1);
+            System.exit(1);
         } catch (IOException e) {
             System.err.println("Błąd odczytu z pliku " + fileName);
             e.printStackTrace();
-            System.exit(-1);
+            System.exit(1);
         }
 
         if (!supplyGreaterOrEqualToDemand(producers, pharmacies))
             throw new IllegalArgumentException("Liczba szczepionek produkowanych przez producentów nie może być " +
-                                               "mniejsza od zapotrzebowania aptek!");
+                    "mniejsza od zapotrzebowania aptek!");
 
         int insufficientDemandPharmacyid = maxVaccinesLessThanPharmacyDemand(pharmacies, connections);
         if (insufficientDemandPharmacyid != -1)
             throw new IllegalArgumentException("Maksymalna ilość szczepionek, która może zostać dostarczona " +
-                                               "do apteki o numerze id " + insufficientDemandPharmacyid + " jest " +
-                                               "mniejsza od jej zapotrzebowania!");
+                    "do apteki o numerze id " + insufficientDemandPharmacyid + " jest " +
+                    "mniejsza od jej zapotrzebowania!");
 
-        FileData data = new FileData(producers, pharmacies, connections, producersIds, pharmaciesIds);
+        saveConnections(connections, producers, pharmacies);
+        Participants data = new Participants(producers, pharmacies);
         return data;
+    }
+
+    private void saveConnections(List<Connection> connections, List<Producer> producers, List<Pharmacy> pharmacies) {
+        saveConnectionsInProducers(connections, producers);
+        saveConnectionsInPharmacies(connections, pharmacies);
+    }
+
+    private void saveConnectionsInPharmacies(List<Connection> connections, List<Pharmacy> pharmacies) {
+        for (Pharmacy pharmacy: pharmacies) {
+            List<Connection> pharmacyConnections = getConnectionsOfGivenPharmacyId(connections, pharmacy.getId());
+            pharmacy.setConnections(pharmacyConnections);
+        }
+    }
+
+    private List<Connection> getConnectionsOfGivenPharmacyId(List<Connection> connections, int id) {
+        return dataControl.getConnectionsOfGivenPharmacyId(connections, id);
+    }
+
+    private void saveConnectionsInProducers(List<Connection> connections, List<Producer> producers) {
+        for (Producer producer: producers) {
+            List<Connection> producerConnections = getConnectionsOfGivenProducerId(connections, producer.getId());
+            producer.setConnections(producerConnections);
+        }
+    }
+
+    private List<Connection> getConnectionsOfGivenProducerId(List<Connection> connections, int id) {
+        return dataControl.getConnectionsOfGivenProducerId(connections, id);
     }
 
     private int maxVaccinesLessThanPharmacyDemand(List<Pharmacy> pharmacies, List<Connection> connections) {
@@ -134,8 +161,10 @@ public class FileManager {
         }
         String message;
         if (transactionParticipants.size() == 0) {
-            message = type == PRODUCER ? "W pliku nie znaleziono żadnych producentów." : "W pliku nie znaleziono żadnych aptek.";
-            throw new IllegalArgumentException(message);
+            message = type == PRODUCER ? "W pliku nie znaleziono żadnych producentów." :
+                                         "W pliku nie znaleziono żadnych aptek.";
+
+            throw new ParticipantNotInFileException(message);
         }
         return transactionParticipants;
     }
@@ -143,13 +172,22 @@ public class FileManager {
     private TransactionParticipant readTransactionParticipant(String currentLine, int type) {
         int attributesNumber = 3;
         String[] attributes = getAttributes(currentLine, attributesNumber);
+        int id;
+        String name;
+        int productionOrDemand;
 
-        int id = Integer.parseInt(attributes[0].strip());
-        String name = attributes[1].strip();
+        try {
+            id = Integer.parseInt(attributes[0].strip());
+            productionOrDemand = Integer.parseInt(attributes[2].strip());
+        } catch (NumberFormatException e) {
+            throw new NumberFormatException("Błąd w danie liczbowej w linijce " + line);
+        }
+
+        name = attributes[1].strip();
         if (name.contains("|"))
             throw new IllegalArgumentException("Nazwa producenta ani nazwa apteki nie może zawierać znaku \"|\". " +
-                                               "Błąd w linijce " + line);
-        int productionOrDemand = Integer.parseInt(attributes[2].strip());
+                    "Błąd w linijce " + line);
+
 
         if (id < 0 || productionOrDemand < 0)
             throw new IllegalArgumentException("Wartości liczbowe nie mogą być ujemne! Błąd w linijce " + line);
@@ -161,7 +199,9 @@ public class FileManager {
         return null;
     }
 
-    private List<Connection> readConnections(BufferedReader reader) throws IOException {
+    private List<Connection> readConnections(BufferedReader reader, List<Producer> producers,
+                                             List<Pharmacy> pharmacies) throws IOException {
+
         List<Connection> connections = new ArrayList<>();
         Connection connection = null;
 
@@ -170,20 +210,20 @@ public class FileManager {
             if (nextLine == null)
                 break;
 
-            connection = readConnection(nextLine);
+            connection = readConnection(nextLine, producers, pharmacies);
 
             if (connections.contains(connection))
                 throw new IdAlreadyExistsException("Zduplikowane połączenia! Zduplikowane identyfikatory " +
-                                                   "producenta i apteki w linii " + line);
+                        "producenta i apteki w linii " + line);
             connections.add(connection);
         }
         int connectionsNumber = producersIds.length * pharmaciesIds.length;
         if (connections.size() != connectionsNumber)
             throw new IllegalArgumentException("Nieprawidłowa liczba połączeń! Połączeń w pliku powinno " +
-                                               "być " + connectionsNumber);
+                    "być " + connectionsNumber);
         if (!allCombinationsOfConnectionsExistInFile(connections, connectionsNumber))
             throw new InvalidConnectionsException("Błąd w połączeniach - w pliku powinny znaleźć się wszystkie " +
-                                                  "możliwe kombinacje połączeń producentów i aptek");
+                    "możliwe kombinacje połączeń producentów i aptek");
 
         return connections;
     }
@@ -195,8 +235,8 @@ public class FileManager {
 
         for (int i = 0; i < connectionsNumber; i++) {
             combinationFound = false;
-            producerIdToCheck = connections.get(i).getProducerId();
-            pharmacyIdToCheck = connections.get(i).getPharmacyId();
+            producerIdToCheck = connections.get(i).getProducer().getId();
+            pharmacyIdToCheck = connections.get(i).getPharmacy().getId();
             for (int j = 0; j < producersIds.length; j++) {
                 if (combinationFound)
                     break;
@@ -213,19 +253,30 @@ public class FileManager {
         return true;
     }
 
-    private Connection readConnection(String currentLine) {
+    private Connection readConnection(String currentLine, List<Producer> producers, List<Pharmacy> pharmacies) {
         int attributesNumber = 4;
         String[] attributes = getAttributes(currentLine, attributesNumber);
+        int producerId;
+        int pharmacyId;
+        int maxVaccines;
+        double price;
 
-        int producerId = Integer.parseInt(attributes[0].strip());
-        int pharmacyId = Integer.parseInt(attributes[1].strip());
-        int maxVaccines = Integer.parseInt(attributes[2].strip());
-        double price = Double.parseDouble(attributes[3].strip());
+        try {
+            producerId = Integer.parseInt(attributes[0].strip());
+            pharmacyId = Integer.parseInt(attributes[1].strip());
+            maxVaccines = Integer.parseInt(attributes[2].strip());
+            price = Double.parseDouble(attributes[3].strip());
+        } catch (NumberFormatException e) {
+            throw new NumberFormatException("Błąd w danie liczbowej w linijce " + line);
+        }
 
         if (producerId < 0 || pharmacyId < 0 || maxVaccines < 0 || price < 0)
             throw new IllegalArgumentException("Wartości liczbowe nie mogą być ujemne! Błąd w linijce " + line);
 
-        return new Connection(producerId, pharmacyId, maxVaccines, price);
+        Producer producer = getProducerById(producers, producerId);
+        Pharmacy pharmacy = getPharmacyById(pharmacies, pharmacyId);
+
+        return new Connection(producer, pharmacy, maxVaccines, price);
     }
 
     private String[] getAttributes(String currentLine, int attributesNumber) {
@@ -234,9 +285,17 @@ public class FileManager {
         attributes = currentLine.split(" \\| ");
         if (invalidLength(attributes, attributesNumber) || invalidParams(attributes, attributesNumber))
             throw new InputDataException("W podanej linii: " + currentLine + " pewne dane są puste lub nie istnieją. " +
-                                         "Błąd w linijce " + line);
+                    "Błąd w linijce " + line);
 
         return attributes;
+    }
+
+    private Producer getProducerById(List<Producer> producers, int id) {
+        return dataControl.getProducerById(producers, id, line);
+    }
+
+    private Pharmacy getPharmacyById(List<Pharmacy> pharmacies, int id) {
+        return dataControl.getPharmacyById(pharmacies, id, line);
     }
 
     private boolean invalidLength(String[] attributes, int attributesNumber) {
